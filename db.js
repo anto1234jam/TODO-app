@@ -1,75 +1,109 @@
 const express = require("express");
-const mysql = require("mysql2");
 const cors = require("cors");
+const jwt = require("jsonwebtoken");
+const dotenv = require("dotenv");
 const { PrismaClient } = require("@prisma/client");
+const argon2 = require("argon2");
+dotenv.config();
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+
 const prisma = new PrismaClient();
 
+const JWT_SECRET = process.env.JWT_SECRET;
 
-// MYSQL CONNECTION
-const db = mysql.createConnection({
+// ================= JWT MIDDLEWARE =================
 
-    host: "localhost",
-    user: "root",
-    password: "",
-    database: "todo_app"
+const verifyToken = (req, res, next) => {
+  const token = req.headers.authorization;
 
-});
+  console.log("Received Token:", token);
+console.log("JWT Secret:", JWT_SECRET);
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      message: "Token Missing",
+    });
+  }
 
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
 
-// DATABASE CONNECT
-db.connect((err) => {
+    req.user = decoded;
 
-    if (err) {
+    console.log("Verified User:", decoded);
 
-        console.log(err);
+    next();
+  } catch (error) {
+    console.log("JWT Error:", error.message);
 
-    } else {
+    return res.status(403).json({
+      success: false,
+      message: "Invalid Token",
+    });
+  }
+};
 
-        console.log("MySQL Connected");
-
-    }
-
-});
-
-
-// SIGNUP API
-// const prisma = require("./prisma");
+// ================= SIGNUP =================
 
 app.post("/signup", async (req, res) => {
   try {
     const { username, email, password } = req.body;
 
+    const existingUser = await prisma.userDetail.findUnique({
+      where: {
+        email,
+      },
+    });
+
+    if (existingUser) {
+      return res.json({
+        success: false,
+        message: "Email already exists",
+      });
+    }
+    const hashedPassword = await argon2.hash(password);
     const user = await prisma.userDetail.create({
       data: {
         username,
         email,
-        password
-      }
+        password: hashedPassword,
+      },
     });
+
+    // Create token immediately after signup
+    const token = jwt.sign(
+      {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+      },
+      JWT_SECRET,
+      {
+        expiresIn: "1d",
+      }
+    );
 
     res.json({
       success: true,
-      user
+      token,
+      email: user.email,
     });
-
   } catch (error) {
+    console.log("Signup Error:", error);
 
-    console.log("SIGNUP ERROR:");
-    console.log(error);
-
-    res.json({
+    res.status(500).json({
       success: false,
-      error: error.message
+      message: error.message,
     });
   }
 });
 
-// LOGIN API
+// ================= LOGIN =================
+
 app.post("/login", async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -77,95 +111,145 @@ app.post("/login", async (req, res) => {
     const user = await prisma.userDetail.findFirst({
       where: {
         username,
-        password
-      }
+        
+      },
     });
 
-    if (user) {
-      res.json({
-        success: true,
-        email: user.email
-      });
-    } else {
-      res.json({
-        success: false
+    if (!user) {
+      return res.json({
+        success: false,
+        message: "Invalid Username or Password",
       });
     }
+      const validPassword = await argon2.verify(
+      user.password,
+      password
+    );
 
-  } catch (error) {
-    console.log(error);
+    if (!validPassword) {
+      return res.json({
+        success: false,
+        message: "Invalid Password",
+      });
+    }
+    const token = jwt.sign(
+      {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+      },
+      JWT_SECRET,
+      {
+        expiresIn: "1d",
+      }
+    );
 
     res.json({
-      success: false
+      success: true,
+      token,
+      email: user.email,
+    });
+  } catch (error) {
+    console.log("Login Error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Server Error",
     });
   }
 });
 
-// GET USER TASKS
-app.get("/tasks/:email", async (req, res) => {
+// ================= GET TASKS =================
+
+app.get("/tasks/:email", verifyToken, async (req, res) => {
   try {
     const { email } = req.params;
 
     const tasks = await prisma.userTask.findMany({
       where: {
-        email
-      }
+        email,
+      },
+      orderBy: {
+        id: "desc",
+      },
     });
 
     res.json(tasks);
-
   } catch (error) {
-    console.log(error);
-    res.status(500).json(error);
+    console.log("Get Tasks Error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Server Error",
+    });
   }
 });
 
+// ================= ADD TASK =================
 
-// ADD TASK
-app.post("/tasks", async (req, res) => {
+app.post("/tasks", verifyToken, async (req, res) => {
   try {
+    console.log("Request Body:", req.body);
+
     const { task, status, email } = req.body;
 
     const newTask = await prisma.userTask.create({
       data: {
         task,
         status,
-        email
-      }
+        email,
+      },
     });
 
-    res.json(newTask);
+    console.log("Task Saved:", newTask);
 
+    res.json(newTask);
   } catch (error) {
-    console.log(error);
-    res.status(500).json(error);
+    console.log("Add Task Error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
+// ================= DELETE TASK =================
 
-// DELETE TASK
-app.delete("/tasks/:id", async (req, res) => {
+app.delete("/tasks/:id", verifyToken, async (req, res) => {
   try {
     const id = Number(req.params.id);
 
     await prisma.userTask.delete({
       where: {
-        id
-      }
+        id,
+      },
     });
 
     res.json({
-      success: true
+      success: true,
     });
-
   } catch (error) {
-    console.log(error);
-    res.status(500).json(error);
+    console.log("Delete Error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
+// ================= VERIFY TOKEN =================
+
+app.get("/verify-token", verifyToken, (req, res) => {
+  res.json({
+    success: true,
+    user: req.user,
+  });
+});
+
+// ================= START SERVER =================
+
 app.listen(3000, () => {
-
-    console.log("Server Running On Port 3000");
-
+  console.log("Server Running On Port 3000");
 });
